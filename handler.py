@@ -105,13 +105,13 @@ def handler(job):
     data = job["input"]
 
     # Admin: scrape vLLM /metrics pra ver acceptance rate do MTP/spec decoding
-    if data.get("_admin") == "metrics":
+    if data.get("admin_cmd") == "metrics":
         r = requests.get(f"{BASE_URL}/metrics", timeout=10)
         lines = r.text.splitlines()
         relevant = [l for l in lines if not l.startswith("#") and any(
             k in l for k in ["spec_decode", "draft", "accepted", "num_emitted", "acceptance"]
         )]
-        yield {"metrics": "\n".join(relevant) or "(no spec_decode metrics found)"}
+        yield {"metrics": "\n".join(relevant) or "(no spec_decode metrics found)", "total_lines": len(lines)}
         return
 
     want_stream = data.get("stream", False)
