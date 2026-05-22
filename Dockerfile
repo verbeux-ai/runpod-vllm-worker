@@ -9,7 +9,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_DEVICE_MAX_CONNECTIONS=1 \
     NCCL_P2P_DISABLE=1 \
     OMP_NUM_THREADS=1 \
-    HF_HUB_ENABLE_HF_TRANSFER=1 \
     HF_HOME=/models
 
 RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates && \

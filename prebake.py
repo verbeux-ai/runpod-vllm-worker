@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Baixa modelo HF arquivo-por-arquivo com retry + heartbeat.
+Baixa modelo HF com retry + heartbeat.
 
-Por que não snapshot_download:
-- snapshot_download() não retry per-file: se um shard stall (caso visto com AEON-7),
-  o download inteiro fica travado sem progresso.
-- hf_hub_download() per-file com try/except permite isolar e retry o shard problemático.
-
-Ativa hf_transfer ANTES de importar huggingface_hub (env var precede o import).
+hf_transfer (Rust) tem bug de stall em sockets — ignora timeouts do Python.
+Visto duas vezes: trava num arquivo por 10+ min sem retornar erro nem deixar retry rodar.
+Solução: DESABILITAR hf_transfer e usar download sequencial padrão.
+Trade-off: ~15min vs ~5min, mas previsível.
 """
 import os
 import sys
@@ -16,9 +14,9 @@ import fnmatch
 import subprocess
 import threading
 
-# Configuração obrigatória ANTES dos imports do HF.
-os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
-os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")  # 30s por chunk
+# DESLIGA hf_transfer — bug de stall conhecido em arquivos grandes
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
 
 import huggingface_hub  # noqa: E402
 from huggingface_hub import HfApi, hf_hub_download  # noqa: E402
@@ -29,23 +27,15 @@ PATTERNS = sys.argv[2].split(",") if len(sys.argv) > 2 else ["*"]
 print(f"[prebake] repo={REPO}", flush=True)
 print(f"[prebake] patterns={PATTERNS}", flush=True)
 print(f"[prebake] huggingface_hub={huggingface_hub.__version__}", flush=True)
-try:
-    import hf_transfer  # noqa: F401
-    print(f"[prebake] hf_transfer={hf_transfer.__version__} ENABLED", flush=True)
-except ImportError as e:
-    print(f"[prebake] WARN: hf_transfer não instalado ({e}) — download será lento", flush=True)
+print(f"[prebake] hf_transfer DISABLED (avoiding stall bug)", flush=True)
 
 api = HfApi()
-all_files = api.list_repo_files(REPO)
-selected = [f for f in all_files if any(fnmatch.fnmatch(f, p) for p in PATTERNS)]
-
-# Tamanhos pra log
 info = api.model_info(REPO, files_metadata=True)
 sizes = {s.rfilename: (s.size or 0) for s in (info.siblings or [])}
+selected = [f for f in sizes.keys() if any(fnmatch.fnmatch(f, p) for p in PATTERNS)]
 total_bytes = sum(sizes.get(f, 0) for f in selected)
-print(f"[prebake] {len(selected)} arquivos selecionados / {total_bytes/1e9:.2f}GB total", flush=True)
+print(f"[prebake] {len(selected)} arquivos / {total_bytes/1e9:.2f}GB total", flush=True)
 
-# Heartbeat reportando tamanho do /models a cada 15s.
 done = threading.Event()
 def heartbeat():
     started = time.time()
@@ -69,19 +59,18 @@ for i, fname in enumerate(selected, 1):
             hf_hub_download(repo_id=REPO, filename=fname)
             elapsed = time.time() - f_t0
             speed = (sizes.get(fname, 0) / 1e6) / elapsed if elapsed > 0 else 0
-            print(f"[prebake]   ✓ done in {elapsed:.1f}s ({speed:.1f} MB/s)", flush=True)
+            print(f"[prebake]   ✓ {elapsed:.1f}s ({speed:.1f} MB/s)", flush=True)
             break
         except Exception as e:
             last_err = e
             wait = min(2 ** attempt, 30)
-            print(f"[prebake]   ✗ attempt {attempt}/5 failed: {type(e).__name__}: {e}", flush=True)
-            print(f"[prebake]   retrying in {wait}s...", flush=True)
+            print(f"[prebake]   ✗ attempt {attempt}/5: {type(e).__name__}: {e}", flush=True)
             time.sleep(wait)
     else:
         done.set()
-        print(f"[prebake] FAILED após 5 tentativas em {fname}: {last_err}", flush=True)
+        print(f"[prebake] FAILED em {fname}: {last_err}", flush=True)
         sys.exit(1)
 
 done.set()
 elapsed = time.time() - t0
-print(f"[prebake] ✓ DONE em {elapsed:.1f}s ({total_bytes/1e6/elapsed:.1f} MB/s média)", flush=True)
+print(f"[prebake] ✓ DONE em {elapsed:.1f}s (média {total_bytes/1e6/elapsed:.1f} MB/s)", flush=True)
